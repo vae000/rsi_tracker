@@ -1,1 +1,5 @@
-- 使用uv管理python环境
+- 使用uv管理python环境并启动项目
+```
+uv sync
+uv run rsi_tracker.py
+```

@@ -4,7 +4,7 @@
 币安合约 SOLUSDT 实时数据获取、RSI 计算和自动交易
 使用 python-binance 获取实时K线数据，计算15分钟级别的RSI指标，并在超卖时自动下单
 
-check_and_trade 核心函数
+check_and_trade  check_adx_filter 核心函数
 """
 
 import pandas as pd
@@ -54,6 +54,13 @@ class RSITracker:
         self.rsi_period = self.config['rsi']['period']
         self.rsi_oversold = self.config['rsi']['oversold']
         self.rsi_overbought = self.config['rsi']['overbought']
+
+        # 从配置文件加载ADX配置
+        self.adx_period = self.config['adx']['period']
+        self.adx_trend_threshold = self.config['adx']['trend_threshold']
+        self.adx_sideways_threshold = self.config['adx']['sideways_threshold']
+        self.adx_enable_filter = self.config['adx']['enable_filter']
+        self.adx_filter_mode = self.config['adx']['filter_mode']
         self.position_ratio = self.config['position']['ratio']
         self.leverage = self.config['position']['leverage']
         self.stop_loss_pct = self.config['risk_management']['stop_loss_pct']
@@ -61,7 +68,12 @@ class RSITracker:
         
         # 存储K线数据的DataFrame
         self.klines_df = pd.DataFrame()
-        
+
+        # 技术指标存储
+        self.current_rsi = None
+        self.current_adx = None
+        self.adx_period = 14  # ADX计算周期
+
         # 交易状态追踪
         self.last_order_time = 0
         self.order_cooldown = self.config['trading_limits']['order_cooldown']
@@ -245,9 +257,10 @@ class RSITracker:
             self.klines_df = df
             print(f"获取到 {len(df)} 条历史K线数据")
             
-            # 计算初始RSI
+            # 计算初始RSI和ADX
             self.calculate_rsi()
-            
+            self.calculate_adx()
+
             return True
             
         except Exception as e:
@@ -275,15 +288,86 @@ class RSITracker:
             # 使用最新的价格序列计算RSI
             price_array = np.array(close_prices)
             rsi = talib.RSI(price_array, timeperiod=self.rsi_period)
-            
+
+
+
             # 获取最新的RSI值
             latest_rsi = rsi[-1] if not np.isnan(rsi[-1]) else None
-            
+
+            # 更新实例变量
+            self.current_rsi = latest_rsi
+
             return latest_rsi
             
         except Exception as e:
             print(f"计算RSI失败: {e}")
             return None
+
+    def calculate_adx(self, current_price=None):
+        """计算ADX指标（平均趋向指数）"""
+        if len(self.klines_df) < self.adx_period:
+            print("数据不足，无法计算ADX")
+            return None
+
+        try:
+            # 使用历史高低收价格计算ADX
+            high_prices = self.klines_df['high'].values.astype(float).tolist()
+            low_prices = self.klines_df['low'].values.astype(float).tolist()
+            close_prices = self.klines_df['close'].values.astype(float).tolist()
+
+            # 如果提供了当前价格，将其作为最新的数据点
+            if current_price is not None:
+                # 需要同时提供高低收价格，这里使用当前价格作为近似值
+                high_prices.append(float(current_price))
+                low_prices.append(float(current_price))
+                close_prices.append(float(current_price))
+
+            # 确保有足够的数据点
+            if len(high_prices) < self.adx_period or len(low_prices) < self.adx_period or len(close_prices) < self.adx_period:
+                return None
+
+            # 使用TA-Lib计算ADX
+            high_array = np.array(high_prices)
+            low_array = np.array(low_prices)
+            close_array = np.array(close_prices)
+
+            adx = talib.ADX(high_array, low_array, close_array, timeperiod=self.adx_period)
+
+            # 获取最新的ADX值
+            latest_adx = adx[-1] if not np.isnan(adx[-1]) else None
+
+            # 更新实例变量
+            self.current_adx = latest_adx
+
+            return latest_adx
+
+        except Exception as e:
+            print(f"计算ADX失败: {e}")
+            self.current_adx = None
+            return None
+
+    def check_adx_filter(self):
+        """检查ADX过滤器条件"""
+        if not self.adx_enable_filter or self.current_adx is None:
+            return True  # 如果未启用过滤器或ADX数据不足，允许交易
+
+        if self.adx_filter_mode == 'trend':
+            # 强趋势模式：只有在ADX > 趋势阈值时才允许交易
+            allow_trade = self.current_adx > self.adx_trend_threshold
+            reason = "强趋势环境" if allow_trade else "非强趋势环境"
+        elif self.adx_filter_mode == 'sideways':
+            # 震荡模式：只有在ADX < sideways_threshold时才允许交易
+            allow_trade = self.current_adx < self.adx_sideways_threshold
+            reason = "震荡环境" if allow_trade else "非震荡环境"
+        else:
+            # 未知模式，允许交易
+            allow_trade = True
+            reason = "过滤器模式未知"
+
+        if not allow_trade:
+            print(f"ADX过滤器阻止交易: {reason} (ADX: {self.current_adx:.2f})")
+
+        return allow_trade
 
     def get_account_balance(self):
         """获取账户余额"""
@@ -758,7 +842,12 @@ class RSITracker:
         # 检查RSI超卖信号
         if current_rsi < self.rsi_oversold:
             print(f"🎯 检测到RSI超卖信号: {current_rsi:.2f}")
-            
+
+            # 检查ADX过滤器
+            if not self.check_adx_filter():
+                print("🚫 ADX过滤器阻止做多交易")
+                return
+
             # 检查每日交易限制
             if not self.check_daily_limits():
                 print("⚠️ 已达到每日交易限制，跳过下单")
@@ -790,7 +879,12 @@ class RSITracker:
         # 检查RSI超买信号
         if current_rsi > self.rsi_overbought:
             print(f"🎯 检测到RSI超买信号: {current_rsi:.2f}")
-            
+
+            # 检查ADX过滤器
+            if not self.check_adx_filter():
+                print("🚫 ADX过滤器阻止做空交易")
+                return
+
             # 检查每日交易限制
             if not self.check_daily_limits():
                 print("⚠️ 已达到每日交易限制，跳过下单")
@@ -826,13 +920,15 @@ class RSITracker:
         
         latest = self.klines_df.iloc[-1]
         
-        # 计算RSI，包含实时价格
+        # 计算RSI和ADX，包含实时价格
         if current_price is not None and is_realtime:
             latest_rsi = self.calculate_rsi(current_price)
+            latest_adx = self.calculate_adx(current_price)
             display_price = current_price
             price_label = "实时价格"
         else:
             latest_rsi = self.calculate_rsi()
+            latest_adx = self.calculate_adx()
             display_price = float(latest['close'])
             price_label = "收盘价"
         
@@ -899,8 +995,39 @@ class RSITracker:
             print("⏳ RSI指标: 计算中...")
             print("   等待足够的历史数据...")
 
+        # ADX分析
+        print(f"{'─'*40}")
+        if latest_adx is not None:
+            # ADX值和状态分析
+            adx_status = "🟢 强趋势" if latest_adx > self.adx_trend_threshold else ("🟡 中性" if latest_adx > self.adx_sideways_threshold else "🔴 弱趋势/震荡")
+            adx_color = "🟢" if latest_adx > self.adx_trend_threshold else ("🟡" if latest_adx > self.adx_sideways_threshold else "🔴")
+
+            print(f"📊 ADX指标 ({self.adx_period}周期):")
+            print(f"   数值: {latest_adx:>8.2f}")
+            print(f"   状态: {adx_status} (趋势阈值: {self.adx_trend_threshold})")
+
+            # ADX信号强度指示器
+            if latest_adx > self.adx_trend_threshold:
+                print(f"   信号: 🟢 强趋势环境 - 适合趋势跟随策略")
+            elif latest_adx < self.adx_sideways_threshold:
+                print(f"   信号: 🔴 震荡环境 - 适合区间交易策略")
+            else:
+                print(f"   信号: 🟡 中性环境 - 谨慎交易")
+
+            # ADX过滤器状态
+            if self.adx_enable_filter:
+                filter_active = (
+                    (self.adx_filter_mode == 'trend' and latest_adx > self.adx_trend_threshold) or
+                    (self.adx_filter_mode == 'sideways' and latest_adx < self.adx_sideways_threshold)
+                )
+                filter_status = "✅ 激活" if filter_active else "❌ 未激活"
+                print(f"   过滤器: {filter_status} (模式: {self.adx_filter_mode})")
+        else:
+            print("⏳ ADX指标: 计算中...")
+            print("   等待足够的历史数据...")
+
         print(f"{'='*80}")
-        
+
         # 显示交易状态
         if self.trading_enabled:
             if self.current_position:
@@ -1276,6 +1403,13 @@ class RSITracker:
                 'oversold': 22,
                 'overbought': 78
             },
+            'adx': {
+                'period': 14,
+                'trend_threshold': 25,
+                'sideways_threshold': 20,
+                'enable_filter': True,
+                'filter_mode': 'trend'
+            },
             'position': {
                 'ratio': 0.9,
                 'leverage': 10,
@@ -1360,6 +1494,10 @@ class RSITracker:
         print(f"RSI 周期: {self.rsi_period}")
         print(f"RSI 超卖阈值: {self.rsi_oversold}")
         print(f"RSI 超买阈值: {self.rsi_overbought}")
+        print(f"ADX 周期: {self.adx_period}")
+        print(f"ADX 趋势阈值: {self.adx_trend_threshold}")
+        print(f"ADX 震荡阈值: {self.adx_sideways_threshold}")
+        print(f"ADX 过滤器: {'启用' if self.adx_enable_filter else '禁用'} ({self.adx_filter_mode}模式)")
         print(f"每次下单比例: {self.position_ratio*100}%")
         print(f"杠杆倍数: {self.leverage}x")
         print(f"止损: {self.stop_loss_pct*100}%")

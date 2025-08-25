@@ -9,9 +9,17 @@ trading:
 
 # RSI指标配置
 rsi:
-  period: 6                            # RSI计算周期
-  oversold: 40                        # RSI超卖阈值
+  period: 14                            # RSI计算周期
+  oversold: 22                        # RSI超卖阈值
   overbought: 78                       # RSI超买阈值
+
+# ADX指标配置
+adx:
+  period: 14                           # ADX计算周期
+  trend_threshold: 25                 # 趋势强度阈值 (ADX > 25表示强趋势)
+  sideways_threshold: 20              # 震荡环境阈值 (ADX < 20表示震荡环境)
+  enable_filter: true                 # 是否启用ADX过滤器
+  filter_mode: 'sideways'                # 过滤模式: 'trend' (强趋势) 或 'sideways' (震荡)
 
 # 仓位管理配置
 position:
